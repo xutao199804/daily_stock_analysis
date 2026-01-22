@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 ===================================
-YfinanceFetcher - 兜底数据源 (Priority 4)
+YfinanceFetcher - 美股数据源 (Priority 1)
 ===================================
 
 数据来源：Yahoo Finance（通过 yfinance 库）
-特点：国际数据源、可能有延迟或缺失
-定位：当所有国内数据源都失败时的最后保障
+特点：美股实时数据、高质量、免费
+定位：美股分析的主力数据源
 
-关键策略：
-1. 自动将 A 股代码转换为 yfinance 格式（.SS / .SZ）
-2. 处理 Yahoo Finance 的数据格式差异
-3. 失败后指数退避重试
+关键特性：
+1. 直接使用美股代码（AAPL, MSFT, TSLA 等）
+2. 支持实时行情和历史数据
+3. 自动处理股票分割和分红调整
+4. 提供基本面数据（PE、市值等）
 """
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import pandas as pd
 from tenacity import (
@@ -34,60 +35,61 @@ logger = logging.getLogger(__name__)
 
 class YfinanceFetcher(BaseFetcher):
     """
-    Yahoo Finance 数据源实现
+    Yahoo Finance 美股数据源实现
     
-    优先级：4（最低，作为兜底）
+    优先级：1（最高，美股主力数据源）
     数据来源：Yahoo Finance
     
-    关键策略：
-    - 自动转换股票代码格式
-    - 处理时区和数据格式差异
-    - 失败后指数退避重试
+    支持的股票代码格式：
+    - 美股：AAPL, MSFT, TSLA, GOOGL 等
+    - ETF：SPY, QQQ, IWM 等
+    - 指数：^GSPC (标普500), ^IXIC (纳斯达克), ^DJI (道琼斯)
     
-    注意事项：
-    - A 股数据可能有延迟
-    - 某些股票可能无数据
-    - 数据精度可能与国内源略有差异
+    关键特性：
+    - 实时行情（15分钟延迟）
+    - 历史数据（完整复权）
+    - 基本面数据
+    - 高可靠性
     """
     
     name = "YfinanceFetcher"
-    priority = 4
+    priority = 1  # ✅ 改为最高优先级（原来是4）
     
     def __init__(self):
         """初始化 YfinanceFetcher"""
         pass
     
-    def _convert_stock_code(self, stock_code: str) -> str:
+    def _validate_stock_code(self, stock_code: str) -> str:
         """
-        转换股票代码为 Yahoo Finance 格式
+        验证并标准化美股代码
         
-        Yahoo Finance A 股代码格式：
-        - 沪市：600519.SS (Shanghai Stock Exchange)
-        - 深市：000001.SZ (Shenzhen Stock Exchange)
+        美股代码格式：
+        - 普通股票：AAPL, MSFT（大写字母）
+        - 指数：^GSPC, ^IXIC（以 ^ 开头）
+        - ETF：SPY, QQQ
+        - 港股：0700.HK（带 .HK 后缀）
         
         Args:
-            stock_code: 原始代码，如 '600519', '000001'
+            stock_code: 原始代码
             
         Returns:
-            Yahoo Finance 格式代码，如 '600519.SS', '000001.SZ'
+            标准化后的代码（大写）
         """
-        code = stock_code.strip()
+        code = stock_code.strip().upper()
         
-        # 已经包含后缀的情况
-        if '.SS' in code.upper() or '.SZ' in code.upper():
-            return code.upper()
-        
-        # 去除可能的后缀
-        code = code.replace('.SH', '').replace('.sh', '')
-        
-        # 根据代码前缀判断市场
-        if code.startswith(('600', '601', '603', '688')):
-            return f"{code}.SS"
-        elif code.startswith(('000', '002', '300')):
-            return f"{code}.SZ"
+        # 美股代码通常是1-5个字母，或以^开头的指数，或带市场后缀
+        if code.startswith('^'):
+            # 指数代码
+            return code
+        elif '.' in code:
+            # 带市场后缀的代码（如港股 0700.HK）
+            return code
+        elif len(code) >= 1 and len(code) <= 5 and code.isalpha():
+            # 标准美股代码
+            return code
         else:
-            logger.warning(f"无法确定股票 {code} 的市场，默认使用深市")
-            return f"{code}.SZ"
+            logger.warning(f"股票代码 {code} 格式可能不正确，但仍尝试获取")
+            return code
     
     @retry(
         stop=stop_after_attempt(3),
@@ -97,19 +99,17 @@ class YfinanceFetcher(BaseFetcher):
     )
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
-        从 Yahoo Finance 获取原始数据
-        
-        使用 yfinance.download() 获取历史数据
+        从 Yahoo Finance 获取美股原始数据
         
         流程：
-        1. 转换股票代码格式
+        1. 验证股票代码
         2. 调用 yfinance API
         3. 处理返回数据
         """
         import yfinance as yf
         
-        # 转换代码格式
-        yf_code = self._convert_stock_code(stock_code)
+        # 验证并标准化代码（✅ 改为美股验证逻辑）
+        yf_code = self._validate_stock_code(stock_code)
         
         logger.debug(f"调用 yfinance.download({yf_code}, {start_date}, {end_date})")
         
@@ -160,20 +160,20 @@ class YfinanceFetcher(BaseFetcher):
         
         df = df.rename(columns=column_mapping)
         
-        # 计算涨跌幅（因为 yfinance 不直接提供）
+        # 计算涨跌幅
         if 'close' in df.columns:
             df['pct_chg'] = df['close'].pct_change() * 100
             df['pct_chg'] = df['pct_chg'].fillna(0).round(2)
         
-        # 计算成交额（yfinance 不提供，使用估算值）
-        # 成交额 ≈ 成交量 * 平均价格
+        # 计算成交额（美股单位：美元）
+        # 成交额 = 成交量 * 收盘价（近似值）
         if 'volume' in df.columns and 'close' in df.columns:
-            df['amount'] = df['volume'] * df['close']
+            df['amount'] = (df['volume'] * df['close']).round(2)
         else:
             df['amount'] = 0
         
-        # 添加股票代码列
-        df['code'] = stock_code
+        # 添加股票代码列（✅ 保持大写）
+        df['code'] = stock_code.upper()
         
         # 只保留需要的列
         keep_cols = ['code'] + STANDARD_COLUMNS
@@ -181,6 +181,48 @@ class YfinanceFetcher(BaseFetcher):
         df = df[existing_cols]
         
         return df
+    
+    def get_stock_info(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """
+        获取股票基本信息（美股特有功能）
+        
+        返回信息包括：
+        - 公司名称
+        - 市值
+        - PE 比率
+        - 52周最高/最低
+        - 行业板块
+        
+        Args:
+            stock_code: 股票代码
+            
+        Returns:
+            股票信息字典，失败返回 None
+        """
+        import yfinance as yf
+        
+        try:
+            yf_code = self._validate_stock_code(stock_code)
+            ticker = yf.Ticker(yf_code)
+            info = ticker.info
+            
+            # 提取关键信息
+            return {
+                'symbol': info.get('symbol', stock_code),
+                'name': info.get('longName', info.get('shortName', 'N/A')),
+                'market_cap': info.get('marketCap', 0),
+                'pe_ratio': info.get('trailingPE', 0),
+                'forward_pe': info.get('forwardPE', 0),
+                'pb_ratio': info.get('priceToBook', 0),
+                'dividend_yield': info.get('dividendYield', 0),
+                'fifty_two_week_high': info.get('fiftyTwoWeekHigh', 0),
+                'fifty_two_week_low': info.get('fiftyTwoWeekLow', 0),
+                'sector': info.get('sector', 'N/A'),
+                'industry': info.get('industry', 'N/A'),
+            }
+        except Exception as e:
+            logger.warning(f"获取 {stock_code} 基本信息失败: {e}")
+            return None
 
 
 if __name__ == "__main__":
@@ -189,9 +231,29 @@ if __name__ == "__main__":
     
     fetcher = YfinanceFetcher()
     
-    try:
-        df = fetcher.get_daily_data('600519')  # 茅台
-        print(f"获取成功，共 {len(df)} 条数据")
-        print(df.tail())
-    except Exception as e:
-        print(f"获取失败: {e}")
+    # ✅ 改为测试美股
+    test_stocks = ['AAPL', 'MSFT', 'TSLA']
+    
+    for stock in test_stocks:
+        try:
+            print(f"\n{'='*50}")
+            print(f"测试股票: {stock}")
+            print(f"{'='*50}")
+            
+            # 获取历史数据
+            df = fetcher.get_daily_data(stock)
+            print(f"✅ 获取成功，共 {len(df)} 条数据")
+            print("\n最近5天数据：")
+            print(df.tail())
+            
+            # 获取基本信息
+            info = fetcher.get_stock_info(stock)
+            if info:
+                print(f"\n📊 基本信息：")
+                print(f"  公司名称: {info['name']}")
+                print(f"  市值: ${info['market_cap']:,.0f}")
+                print(f"  PE比率: {info['pe_ratio']:.2f}")
+                print(f"  行业: {info['sector']} - {info['industry']}")
+            
+        except Exception as e:
+            print(f"❌ 获取失败: {e}")
